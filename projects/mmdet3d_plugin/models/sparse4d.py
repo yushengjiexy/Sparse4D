@@ -2,6 +2,7 @@
 from inspect import signature
 
 import torch
+import warnings
 
 from mmcv.runner import force_fp32, auto_fp16
 from mmcv.utils import build_from_cfg
@@ -21,6 +22,13 @@ try:
 except:
     DAF_VALID = False
 
+try:
+    import transformer_engine as te
+    from transformer_engine.pytorch import fp8_autocast
+    TE_AVAILABLE = True
+except:
+    TE_AVAILABLE = False
+
 __all__ = ["Sparse4D"]
 
 
@@ -38,6 +46,7 @@ class Sparse4D(BaseDetector):
         use_grid_mask=True,
         use_deformable_func=False,
         depth_branch=None,
+        fp8_enabled=False,
     ):
         super(Sparse4D, self).__init__(init_cfg=init_cfg)
         if pretrained is not None:
@@ -58,6 +67,9 @@ class Sparse4D(BaseDetector):
             self.grid_mask = GridMask(
                 True, True, rotate=1, offset=False, ratio=0.5, mode=1, prob=0.7
             )
+        self.fp8_enabled = fp8_enabled
+        if fp8_enabled and not TE_AVAILABLE:
+            warnings.warn("fp8_enabled=True 但未安装transformer_engine库，将回退到标准精度训练")
 
     @auto_fp16(apply_to=("img",), out_fp32=True)
     def extract_feat(self, img, return_depth=False, metas=None):
@@ -69,12 +81,24 @@ class Sparse4D(BaseDetector):
             num_cams = 1
         if self.use_grid_mask:
             img = self.grid_mask(img)
-        if "metas" in signature(self.img_backbone.forward).parameters:
-            feature_maps = self.img_backbone(img, num_cams, metas=metas)
+        
+        # 使用 fp8_autocast 条件包装
+        if hasattr(self, 'fp8_enabled') and self.fp8_enabled and TE_AVAILABLE:
+            with fp8_autocast(enabled=True):
+                if "metas" in signature(self.img_backbone.forward).parameters:
+                    feature_maps = self.img_backbone(img, num_cams, metas=metas)
+                else:
+                    feature_maps = self.img_backbone(img)
+                if self.img_neck is not None:
+                    feature_maps = list(self.img_neck(feature_maps))
         else:
-            feature_maps = self.img_backbone(img)
-        if self.img_neck is not None:
-            feature_maps = list(self.img_neck(feature_maps))
+            if "metas" in signature(self.img_backbone.forward).parameters:
+                feature_maps = self.img_backbone(img, num_cams, metas=metas)
+            else:
+                feature_maps = self.img_backbone(img)
+            if self.img_neck is not None:
+                feature_maps = list(self.img_neck(feature_maps))
+            
         for i, feat in enumerate(feature_maps):
             feature_maps[i] = torch.reshape(
                 feat, (bs, num_cams) + feat.shape[1:]

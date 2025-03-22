@@ -34,6 +34,45 @@ from projects.mmdet3d_plugin.core.evaluation.eval_hooks import (
 )
 from projects.mmdet3d_plugin.datasets import custom_build_dataset
 
+try:
+    import transformer_engine as te
+    from transformer_engine.pytorch import fp8_autocast
+    TE_AVAILABLE = True
+except:
+    TE_AVAILABLE = False
+
+@HOOKS.register_module()
+class Fp8OptimizerHook(OptimizerHook):
+    """使用FP8混合精度训练的Hook。
+    
+    需要安装NVIDIA的transformer_engine库。
+    """
+    def __init__(self, **kwargs):
+        super(Fp8OptimizerHook, self).__init__(**kwargs)
+        if not TE_AVAILABLE:
+            warnings.warn("transformer_engine未安装，FP8训练不可用，将使用标准OptimizerHook")
+    
+    def after_train_iter(self, runner):
+        if not TE_AVAILABLE:
+            return super().after_train_iter(runner)
+        
+        runner.optimizer.zero_grad()
+        with fp8_autocast(enabled=True):
+            outputs = runner.model(**runner.data_batch)
+            if not isinstance(outputs, dict):
+                loss = outputs
+                runner.outputs = {}
+            else:
+                loss = outputs['loss']
+                runner.outputs = outputs
+        loss.backward()
+        if self.grad_clip is not None:
+            grad_norm = self.clip_grads(runner.model.parameters())
+            if grad_norm is not None:
+                # 添加grad norm到log
+                runner.log_buffer.update({'grad_norm': float(grad_norm)},
+                                         runner.outputs['num_samples'])
+        runner.optimizer.step()
 
 def custom_train_detector(
     model,
@@ -137,9 +176,15 @@ def custom_train_detector(
     # an ugly workaround to make .log and .log.json filenames the same
     runner.timestamp = timestamp
 
-    # fp16 setting
+    # fp16/fp8 setting
     fp16_cfg = cfg.get("fp16", None)
-    if fp16_cfg is not None:
+    fp8_cfg = cfg.get("fp8", None)
+
+    if fp8_cfg is not None and TE_AVAILABLE:
+        optimizer_config = Fp8OptimizerHook(
+            **cfg.optimizer_config, **fp8_cfg, distributed=distributed
+        )
+    elif fp16_cfg is not None:
         optimizer_config = Fp16OptimizerHook(
             **cfg.optimizer_config, **fp16_cfg, distributed=distributed
         )
