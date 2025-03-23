@@ -259,6 +259,7 @@ class SparseBox3DKeyPointsGenerator(BaseModule):
         for i in range(len(T_src2dst_list)):
             vel = anchor[..., VX:]
             vel_dim = vel.shape[-1]
+            
             T_src2dst = torch.unsqueeze(
                 T_src2dst_list[i].to(dtype=anchor.dtype), dim=1
             )
@@ -272,10 +273,12 @@ class SparseBox3DKeyPointsGenerator(BaseModule):
                 )
             else:
                 time_interval = None
+            
             if time_interval is not None:
                 translation = vel.transpose(0, -1) * time_interval
                 translation = translation.transpose(0, -1)
                 center = center - translation
+            
             center = (
                 torch.matmul(
                     T_src2dst[..., :3, :3], center[..., None]
@@ -287,15 +290,12 @@ class SparseBox3DKeyPointsGenerator(BaseModule):
                 T_src2dst[..., :2, :2],
                 anchor[..., [COS_YAW, SIN_YAW], None],
             ).squeeze(-1)
+            
             vel = torch.matmul(
                 T_src2dst[..., :vel_dim, :vel_dim], vel[..., None]
             ).squeeze(-1)
+            
             dst_anchor = torch.cat([center, size, yaw, vel], dim=-1)
-            # TODO: Fix bug
-            # index = [X, Y, Z, W, L, H, COS_YAW, SIN_YAW] + [VX, VY, VZ][:vel_dim]
-            # index = torch.tensor(index, device=dst_anchor.device)
-            # index = torch.argsort(index)
-            # dst_anchor = dst_anchor.index_select(dim=-1, index=index)
             dst_anchors.append(dst_anchor)
         return dst_anchors
 

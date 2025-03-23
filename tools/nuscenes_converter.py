@@ -186,6 +186,11 @@ def _fill_trainval_infos(
 
         mmcv.check_file_exist(lidar_path)
 
+        # 添加ego速度信息
+        ego_velocity = None
+        if hasattr(nusc, 'get_velocity'):
+            ego_velocity = nusc.get_velocity(pose_record['token'])
+        
         info = {
             "lidar_path": lidar_path,
             "token": sample["token"],
@@ -196,6 +201,8 @@ def _fill_trainval_infos(
             "ego2global_translation": pose_record["translation"],
             "ego2global_rotation": pose_record["rotation"],
             "timestamp": sample["timestamp"],
+            "ego_velocity": ego_velocity,
+            "use_ego_coordinate": True,
         }
 
         l2e_r = info["lidar2ego_rotation"]
@@ -266,6 +273,14 @@ def _fill_trainval_infos(
             # convert velo from global to lidar
             for i in range(len(boxes)):
                 velo = np.array([*velocity[i], 0.0])
+                
+                # 转换为相对速度
+                if ego_velocity is not None:
+                    # 将目标物全局速度减去ego全局速度，得到相对速度
+                    ego_velo = np.array([*ego_velocity, 0.0])
+                    velo = velo - ego_velo
+                
+                # 然后将全局相对速度转换到雷达坐标系
                 velo = (
                     velo
                     @ np.linalg.inv(e2g_r_mat).T

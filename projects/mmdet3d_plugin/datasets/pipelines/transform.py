@@ -3,6 +3,7 @@ import mmcv
 from mmcv.parallel import DataContainer as DC
 from mmdet.datasets.builder import PIPELINES
 from mmdet.datasets.pipelines import to_tensor
+from quaternion import Quaternion
 
 
 @PIPELINES.register_module()
@@ -220,3 +221,37 @@ class NormalizeMultiviewImage(object):
         repr_str = self.__class__.__name__
         repr_str += f"(mean={self.mean}, std={self.std}, to_rgb={self.to_rgb})"
         return repr_str
+
+
+@PIPELINES.register_module()
+class LoadMultiViewImageFromFiles(object):
+    # 确保相机与雷达的变换不经过全局坐标系
+    def __init__(self, to_float32=False, img_scale=None):
+        # 现有代码...
+        self.use_ego_coordinate = True  # 使用相对坐标标志
+    
+    def __call__(self, results):
+        # 现有代码...
+        
+        # 计算相机到雷达的直接变换，不经过全局坐标系
+        for cam_type, cam_info in results['cams'].items():
+            # 雷达到自车的变换
+            lidar2ego_rotation = results['lidar2ego_rotation']
+            lidar2ego_translation = results['lidar2ego_translation']
+            
+            # 相机到自车的变换
+            camera2ego_rotation = cam_info['sensor2ego_rotation']
+            camera2ego_translation = cam_info['sensor2ego_translation']
+            
+            # 计算相机到雷达的直接变换
+            ego2lidar_rotation = np.linalg.inv(Quaternion(lidar2ego_rotation).rotation_matrix)
+            ego2lidar_translation = -np.array(lidar2ego_translation)
+            ego2lidar_translation = ego2lidar_rotation @ ego2lidar_translation
+            
+            camera2lidar_rotation = ego2lidar_rotation @ Quaternion(camera2ego_rotation).rotation_matrix
+            camera2lidar_translation = ego2lidar_rotation @ np.array(camera2ego_translation) + ego2lidar_translation
+            
+            viewpad = np.eye(4)
+            viewpad[:3, :3] = camera2lidar_rotation
+            viewpad[:3, 3] = camera2lidar_translation
+            results['lidar2img'][cam_idx] = cam_intrinsic @ viewpad

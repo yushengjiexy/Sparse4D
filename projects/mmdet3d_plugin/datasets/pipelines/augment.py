@@ -120,6 +120,8 @@ class BBoxRotation(object):
         )
         bbox_3d[:, :3] = bbox_3d[:, :3] @ rot_mat_T
         bbox_3d[:, 6] += angle
+        
+        # 旋转相对速度 - 方法相同，因为速度是矢量
         if bbox_3d.shape[-1] > 7:
             vel_dims = bbox_3d[:, 7:].shape[-1]
             bbox_3d[:, 7:] = bbox_3d[:, 7:] @ rot_mat_T[:vel_dims, :vel_dims]

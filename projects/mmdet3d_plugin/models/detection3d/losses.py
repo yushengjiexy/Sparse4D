@@ -37,6 +37,7 @@ class SparseBox3DLoss(nn.Module):
         suffix="",
         quality=None,
         cls_target=None,
+        ego_velocity=None,
         **kwargs,
     ):
         # Some categories do not distinguish between positive and negative

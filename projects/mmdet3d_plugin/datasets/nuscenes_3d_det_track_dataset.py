@@ -78,6 +78,7 @@ class NuScenes3DDetTrackDataset(Dataset):
         classes=None,
         load_interval=1,
         with_velocity=True,
+        use_relative_velocity=True,
         modality=None,
         test_mode=False,
         det3d_eval_version="detection_cvpr_2019",
@@ -91,6 +92,7 @@ class NuScenes3DDetTrackDataset(Dataset):
         keep_consistent_seq_aug=True,
         tracking=False,
         tracking_threshold=0.2,
+        convert_to_global_velocity=False,
     ):
         self.version = version
         self.load_interval = load_interval
@@ -111,6 +113,7 @@ class NuScenes3DDetTrackDataset(Dataset):
             self.pipeline = Compose(pipeline)
 
         self.with_velocity = with_velocity
+        self.use_relative_velocity = use_relative_velocity
         self.det3d_eval_version = det3d_eval_version
         self.det3d_eval_configs = det_configs(self.det3d_eval_version)
         self.track3d_eval_version = track3d_eval_version
@@ -134,6 +137,8 @@ class NuScenes3DDetTrackDataset(Dataset):
         self.last_id = None
         if with_seq_flag:
             self._set_sequence_group_flag()
+
+        self.convert_to_global_velocity = convert_to_global_velocity
 
     def __len__(self):
         return len(self.data_infos)
@@ -284,6 +289,11 @@ class NuScenes3DDetTrackDataset(Dataset):
             ego2global_translation=info["ego2global_translation"],
             ego2global_rotation=info["ego2global_rotation"],
         )
+        
+        # 添加ego速度信息 (如果有的话)
+        if hasattr(self, 'metadata') and 'ego_velocity' in info:
+            input_dict['ego_velocity'] = info['ego_velocity']
+        
         lidar2ego = np.eye(4)
         lidar2ego[:3, :3] = pyquaternion.Quaternion(
             info["lidar2ego_rotation"]
@@ -368,18 +378,42 @@ class NuScenes3DDetTrackDataset(Dataset):
 
         print("Start to convert detection format...")
         for sample_id, det in enumerate(mmcv.track_iter_progress(results)):
+            # 获取当前帧的ego信息
+            sample_info = self.data_infos[sample_id]
+            
+            # 如果需要将相对速度转换回全局速度，可以在这里实现
+            # 注意：NuScenes评估需要全局速度，但我们内部使用相对速度
+            
             annos = []
             boxes = output_to_nusc_box(
                 det, threshold=self.tracking_threshold if tracking else None
             )
-            sample_token = self.data_infos[sample_id]["token"]
+            sample_token = sample_info["token"]
+            
+            # 对于需要输出到NuScenes格式的情况，可能需要将相对速度转换回全局速度
+            if hasattr(self, 'convert_to_global_velocity') and self.convert_to_global_velocity:
+                # 获取ego速度
+                ego_velocity = None
+                if 'ego_velocity' in sample_info:
+                    ego_velocity = sample_info['ego_velocity']
+                
+                # 转换每个框的速度
+                for box in boxes:
+                    if ego_velocity is not None:
+                        # 将相对速度转换回全局速度
+                        rel_velocity = box.velocity
+                        global_velocity = [rel_velocity[0] + ego_velocity[0], 
+                                           rel_velocity[1] + ego_velocity[1]]
+                        box.velocity = global_velocity
+            
             boxes = lidar_nusc_box_to_global(
-                self.data_infos[sample_id],
+                sample_info,
                 boxes,
                 mapped_class_names,
                 self.det3d_eval_configs,
                 self.det3d_eval_version,
             )
+            
             for i, box in enumerate(boxes):
                 name = mapped_class_names[box.label]
                 if tracking and name in [
@@ -709,6 +743,51 @@ class NuScenes3DDetTrackDataset(Dataset):
             cv2.imwrite(os.path.join(save_dir, f"{i}.jpg"), image)
             videoWriter.write(image)
         videoWriter.release()
+
+    def get_ego_to_ego_transform(self, src_info, dst_info):
+        """计算两帧之间自车坐标系的变换矩阵"""
+        # 从 src 自车坐标系到全局坐标系的变换
+        src_l2e_r = src_info["lidar2ego_rotation"]
+        src_l2e_t = src_info["lidar2ego_translation"]
+        src_e2g_r = src_info["ego2global_rotation"]
+        src_e2g_t = src_info["ego2global_translation"]
+        
+        # 从 dst 自车坐标系到全局坐标系的变换
+        dst_l2e_r = dst_info["lidar2ego_rotation"]
+        dst_l2e_t = dst_info["lidar2ego_translation"]
+        dst_e2g_r = dst_info["ego2global_rotation"]
+        dst_e2g_t = dst_info["ego2global_translation"]
+        
+        # 计算全局坐标系到 dst 自车坐标系的变换
+        dst_g2e_r = pyquaternion.Quaternion(dst_e2g_r).inverse
+        dst_g2e_t = -np.array(dst_e2g_t)
+        dst_g2e_t = dst_g2e_r.rotation_matrix @ dst_g2e_t
+        
+        dst_e2l_r = pyquaternion.Quaternion(dst_l2e_r).inverse
+        dst_e2l_t = -np.array(dst_l2e_t)
+        dst_e2l_t = dst_e2l_r.rotation_matrix @ dst_e2l_t
+        
+        # 计算 src 自车坐标系到 dst 自车坐标系的变换
+        src_l2e = np.eye(4)
+        src_l2e[:3, :3] = pyquaternion.Quaternion(src_l2e_r).rotation_matrix
+        src_l2e[:3, 3] = np.array(src_l2e_t)
+        
+        src_e2g = np.eye(4)
+        src_e2g[:3, :3] = pyquaternion.Quaternion(src_e2g_r).rotation_matrix
+        src_e2g[:3, 3] = np.array(src_e2g_t)
+        
+        dst_g2e = np.eye(4)
+        dst_g2e[:3, :3] = dst_g2e_r.rotation_matrix
+        dst_g2e[:3, 3] = dst_g2e_t
+        
+        dst_e2l = np.eye(4)
+        dst_e2l[:3, :3] = dst_e2l_r.rotation_matrix
+        dst_e2l[:3, 3] = dst_e2l_t
+        
+        # src自车坐标系 -> 全局坐标系 -> dst自车坐标系
+        src2dst = dst_g2e @ src_e2g
+        
+        return src2dst
 
 
 def output_to_nusc_box(detection, threshold=None):

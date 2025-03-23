@@ -36,6 +36,7 @@ class InstanceBank(nn.Module):
         anchor_grad=True,
         feat_grad=True,
         max_time_interval=2,
+        use_ego_coordinate=True,
     ):
         super(InstanceBank, self).__init__()
         self.embed_dims = embed_dims
@@ -43,6 +44,7 @@ class InstanceBank(nn.Module):
         self.default_time_interval = default_time_interval
         self.confidence_decay = confidence_decay
         self.max_time_interval = max_time_interval
+        self.use_ego_coordinate = use_ego_coordinate
 
         if anchor_handler is not None:
             anchor_handler = build_from_cfg(anchor_handler, PLUGIN_LAYERS)
@@ -252,3 +254,18 @@ class InstanceBank(nn.Module):
             (0, self.num_anchor - self.num_temp_instances),
             value=-1,
         )
+
+    def forward(self, img_feats, radar_feats=None, img_metas=None):
+        # 使用自车坐标系下的变换，而非全局变换
+        if self.use_ego_coordinate:
+            # 获取相邻帧之间的自车坐标系变换
+            ego_transforms = []
+            for i in range(1, len(img_metas)):
+                src_info = img_metas[i][0]  # 历史帧
+                dst_info = img_metas[0][0]  # 当前帧
+                # 使用dataset的方法获取自车坐标系变换
+                ego_transform = self.get_ego_to_ego_transform(src_info, dst_info)
+                ego_transforms.append(torch.from_numpy(ego_transform).float().to(img_feats[0].device))
+            
+            # 使用自车坐标系变换代替全局坐标系变换
+            self.temporal_alignment(ego_transforms, timestamps)
